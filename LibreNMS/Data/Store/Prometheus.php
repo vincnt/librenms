@@ -40,6 +40,7 @@ class Prometheus extends BaseDatastore
     private $default_opts;
     private $enabled;
     private $prefix;
+    private $group_values; #new
 
     public function __construct(\GuzzleHttp\Client $client)
     {
@@ -48,7 +49,7 @@ class Prometheus extends BaseDatastore
 
         $url = Config::get('prometheus.url');
         $job = Config::get('prometheus.job', 'librenms');
-        $this->base_uri = "$url/metrics/job/$job/instance/";
+	$push_frequency = Config::get('prometheus.push_frequency',30);
         $this->prefix = Config::get('prometheus.prefix', '');
         if ($this->prefix) {
             $this->prefix = "$this->prefix" . '_';
@@ -62,6 +63,10 @@ class Prometheus extends BaseDatastore
         }
 
         $this->enabled = self::isEnabled();
+  
+  	$this->group_values = array(); #new
+        $this->base_uri = "$url/metrics/job/$job";
+        $this->last_pushed_time = time();
     }
 
     public function getName()
@@ -83,43 +88,54 @@ class Prometheus extends BaseDatastore
         }
 
         try {
-            $vals = '';
-            $promtags = '/measurement/' . $measurement;
-
-            foreach ($fields as $k => $v) {
-                if ($v !== null) {
-                    $vals .= $this->prefix . "$k $v\n";
-                }
-            }
-
+            $labels = array(); #new
             foreach ($tags as $t => $v) {
                 if ($v !== null) {
-                    $promtags .= (Str::contains($v, '/') ? "/$t@base64/" . base64_encode($v) : "/$t/$v");
+                    array_push($labels, "$t=\"" . addcslashes($v, '\\') . "\""); # new
                 }
             }
+
             $options = $this->getDefaultOptions();
-            $options['body'] = $vals;
 
-            $promurl = $this->base_uri . $device['hostname'] . $promtags;
+            array_push($labels, "instance=\"" . $device['hostname'] . "\""); # new
+            array_push($labels, "measurement=\"" . addcslashes($measurement,'\\') . "\""); # new
             if (Config::get('prometheus.attach_sysname', false)) {
-                $promurl .= '/sysName/' . $device['sysName'];
+                    array_push($labels, "sysName=\"".$device['sysName']."\""); #new
             }
-            $promurl = str_replace(' ', '-', $promurl); // Prometheus doesn't handle tags with spaces in url
 
-            Log::debug("Prometheus put $promurl: ", [
-                'measurement' => $measurement,
-                'tags' => $tags,
-                'fields' => $fields,
-                'vals' => $vals,
-            ]);
+           
+            # Update the in memory values for each grouping 
+            foreach ($fields as $k => $v) {
+                if ($v !== null) {
+                        $group = $this->prefix . $k . "{" . implode(',',$labels) ."}";
+                        $this->group_values[$group] = $v;
+                }
+            }
 
-            $result = $this->client->request('POST', $promurl, $options);
+            # Push out all existing groupings based on time interval
+            if (time() - $this->last_pushed_time > $this->push_frequency){
+                $lines = '';
+                foreach ($this->group_values as $g => $v){
+                      $lines .= $g . " $v\n";
+                }
+                $options['body'] = $lines;
+                  
+	        $temp_time_start = time();
+                $result= $this->client->request('PUT', $this->base_uri, $options);
+	        $time_taken = time() - $temp_time_start;
+	        Log::info("Took $time_taken seconds to do push request for group size " . sizeof($this->group_values));
+
+                if ($result->getStatusCode() !== 200) {
+                    Log::error('Prometheus Error: ' . $result->getReasonPhrase());
+                }
+                $this->last_pushed_time = time();
+	        Log::info("Batch of metrics of length " . sizeof($this->group_values) . " pushed to $this->base_uri_new at time $this->last_pushed_time");
+                $this->group_values = array();
+            }
 
             $this->recordStatistic($stat->end());
 
-            if ($result->getStatusCode() !== 200) {
-                Log::error('Prometheus Error: ' . $result->getReasonPhrase());
-            }
+
         } catch (GuzzleException $e) {
             Log::error('Prometheus Exception: ' . $e->getMessage());
         }
