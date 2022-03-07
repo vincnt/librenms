@@ -47,23 +47,14 @@ class Prometheus extends BaseDatastore
         parent::__construct();
         $this->client = $client;
 
-        $url = Config::get('prometheus.url');
         $job = Config::get('prometheus.job', 'librenms');
         $this->prefix = Config::get('prometheus.prefix', '');
         if ($this->prefix) {
             $this->prefix = "$this->prefix" . '_';
         }
         $prune_threshold_seconds = Config::get('prometheus.prune_threshold_seconds', 300);
-        $this->default_opts = [
-            'headers' => ['Content-Type' => 'text/plain'],
-        ];
-        if ($proxy = Proxy::get($url)) {
-            $this->default_opts['proxy'] = $proxy;
-        }
 
         $this->enabled = self::isEnabled();
-
-        $this->base_uri = "$url/metrics/job/$job";
     }
 
     public function getName()
@@ -84,63 +75,52 @@ class Prometheus extends BaseDatastore
             return;
         }
 
-        try {
-            $labels = array(); #new
-            foreach ($tags as $t => $v) {
+        $labels = array();
+        foreach ($tags as $t => $v) {
+            if ($v !== null) {
+                array_push($labels, "$t=\"" . addcslashes($v, '\\') . "\"");
+            }
+        }
+
+        array_push($labels, "job=\"" . $this->job . "\"");
+        array_push($labels, "instance=\"" . $device['hostname'] . "\"");
+        array_push($labels, "measurement=\"" . addcslashes($measurement,'\\') . "\"");
+        if (Config::get('prometheus.attach_sysname', false)) {
+                array_push($labels, "sysName=\"".$device['sysName']."\"");
+        }
+
+        $target_file = "/opt/librenms/prometheus_metrics/" . $device['hostname'] . "_" . $measurement . ".prom";
+        $group_values = array();
+        // Check existing file for metrics and prune old ones
+        if (file_exists($target_file)){
+            $existing_lines = explode("\n", file_get_contents($target_file));
+            $prune_threshold_seconds = 300300300;
+            foreach ($existing_lines as $v){
                 if ($v !== null) {
-                    array_push($labels, "$t=\"" . addcslashes($v, '\\') . "\""); # new
-                }
-            }
-
-
-            array_push($labels, "instance=\"" . $device['hostname'] . "\""); # new
-            array_push($labels, "measurement=\"" . addcslashes($measurement,'\\') . "\""); # new
-            if (Config::get('prometheus.attach_sysname', false)) {
-                    array_push($labels, "sysName=\"".$device['sysName']."\""); #new
-            }
-
-
-            # New one
-            $target_file = "/opt/librenms/prometheus_metrics/" . $device['hostname'];
-            $group_values = array();
-            if (file_exists($target_file)){
-                $existing_lines = explode("\n", file_get_contents($target_file));
-                $prune_threshold_seconds = 300300300;
-                foreach ($existing_lines as $v){
-                    if ($v !== null) {
-                        $items = explode(" ", $v);
-                        if (count($items)==3 && time() - $items[2]/1000 < $prune_threshold_seconds){
-                            $group_values[$items[0]] = $items[1] . " " . $items[2];
-                        }
+                    $items = explode(" ", $v);
+                    if (count($items)==3 && time() - $items[2]/1000 < $prune_threshold_seconds){
+                        $group_values[$items[0]] = $items[1] . " " . $items[2];
                     }
                 }
             }
-            foreach ($fields as $k => $v) {
-                if ($v !== null) {
-                        $group = $this->prefix . $k . "{" . implode(',',$labels) ."}";
-                        $group_values[$group] = "$v " . time() . "000";
-                }
-            }
-
-            $lines = '';
-            foreach ($group_values as $g => $v){
-                $lines .= $g . " $v\n";
-            }
-
-            $temp_time_start = time();
-            $res = file_put_contents($target_file, $lines);
-            Log::info(error_get_last());
-            Log::info("Wrote to file " . $target_file);
-            $time_taken = time() - $temp_time_start;
-            Log::info("Took $time_taken seconds to do file write for group size " . sizeof($group_values));
-
-
-            $this->recordStatistic($stat->end());
-
-
-        } catch (GuzzleException $e) {
-            Log::error('Prometheus Exception: ' . $e->getMessage());
         }
+        // Add or replace with the new metrics from this polling session
+        foreach ($fields as $k => $v) {
+            if ($v !== null) {
+                    $group = $this->prefix . $k . "{" . implode(',',$labels) ."}";
+                    $group_values[$group] = "$v " . time() . "000";
+            }
+        }
+
+        $lines = '';
+        foreach ($group_values as $g => $v){
+            $lines .= $g . " $v\n";
+        }
+
+        $res = file_put_contents($target_file, $lines);
+        Log::info("Res: $res for writing metrics to $target_file");
+
+        $this->recordStatistic($stat->end());
     }
 
     private function getDefaultOptions()
