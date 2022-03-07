@@ -49,12 +49,11 @@ class Prometheus extends BaseDatastore
 
         $url = Config::get('prometheus.url');
         $job = Config::get('prometheus.job', 'librenms');
-	$push_frequency = Config::get('prometheus.push_frequency',30);
         $this->prefix = Config::get('prometheus.prefix', '');
         if ($this->prefix) {
             $this->prefix = "$this->prefix" . '_';
         }
-
+        $prune_threshold_seconds = Config::get('prometheus.prune_threshold_seconds', 300);
         $this->default_opts = [
             'headers' => ['Content-Type' => 'text/plain'],
         ];
@@ -63,10 +62,8 @@ class Prometheus extends BaseDatastore
         }
 
         $this->enabled = self::isEnabled();
-  
-  	$this->group_values = array(); #new
+
         $this->base_uri = "$url/metrics/job/$job";
-        $this->last_pushed_time = time();
     }
 
     public function getName()
@@ -95,7 +92,6 @@ class Prometheus extends BaseDatastore
                 }
             }
 
-            $options = $this->getDefaultOptions();
 
             array_push($labels, "instance=\"" . $device['hostname'] . "\""); # new
             array_push($labels, "measurement=\"" . addcslashes($measurement,'\\') . "\""); # new
@@ -103,35 +99,41 @@ class Prometheus extends BaseDatastore
                     array_push($labels, "sysName=\"".$device['sysName']."\""); #new
             }
 
-           
-            # Update the in memory values for each grouping 
+
+            # New one
+            $target_file = "/opt/librenms/prometheus_metrics/" . $device['hostname'];
+            $group_values = array();
+            if (file_exists($target_file)){
+                $existing_lines = explode("\n", file_get_contents($target_file));
+                $prune_threshold_seconds = 300300300;
+                foreach ($existing_lines as $v){
+                    if ($v !== null) {
+                        $items = explode(" ", $v);
+                        if (count($items)==3 && time() - $items[2]/1000 < $prune_threshold_seconds){
+                            $group_values[$items[0]] = $items[1] . " " . $items[2];
+                        }
+                    }
+                }
+            }
             foreach ($fields as $k => $v) {
                 if ($v !== null) {
                         $group = $this->prefix . $k . "{" . implode(',',$labels) ."}";
-                        $this->group_values[$group] = $v;
+                        $group_values[$group] = "$v " . time() . "000";
                 }
             }
 
-            # Push out all existing groupings based on time interval
-            if (time() - $this->last_pushed_time > $this->push_frequency){
-                $lines = '';
-                foreach ($this->group_values as $g => $v){
-                      $lines .= $g . " $v\n";
-                }
-                $options['body'] = $lines;
-                  
-	        $temp_time_start = time();
-                $result= $this->client->request('PUT', $this->base_uri, $options);
-	        $time_taken = time() - $temp_time_start;
-	        Log::info("Took $time_taken seconds to do push request for group size " . sizeof($this->group_values));
-
-                if ($result->getStatusCode() !== 200) {
-                    Log::error('Prometheus Error: ' . $result->getReasonPhrase());
-                }
-                $this->last_pushed_time = time();
-	        Log::info("Batch of metrics of length " . sizeof($this->group_values) . " pushed to $this->base_uri_new at time $this->last_pushed_time");
-                $this->group_values = array();
+            $lines = '';
+            foreach ($group_values as $g => $v){
+                $lines .= $g . " $v\n";
             }
+
+            $temp_time_start = time();
+            $res = file_put_contents($target_file, $lines);
+            Log::info(error_get_last());
+            Log::info("Wrote to file " . $target_file);
+            $time_taken = time() - $temp_time_start;
+            Log::info("Took $time_taken seconds to do file write for group size " . sizeof($group_values));
+
 
             $this->recordStatistic($stat->end());
 
