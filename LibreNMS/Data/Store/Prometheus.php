@@ -150,10 +150,10 @@ class Prometheus extends BaseDatastore
     private function runLocal($device, $measurement, $tags, $fields)
     {
         if ($this->metrics_dir == null){
-           die("metrics_dir not set in config.php for prometheus");
+			die("metrics_dir not set in config.php for prometheus");
         }
         if (!file_exists($this->metrics_dir)){
-           die("metrics_dir $this->metrics_dir doesn't exist. You need to create one manually");
+			die("metrics_dir $this->metrics_dir doesn't exist. You need to create one manually");
         }
         // Build up labels
         $labels = array();
@@ -186,8 +186,8 @@ class Prometheus extends BaseDatastore
                         $timestamp = $items[2] / 1000;
                         if ($current_time - $timestamp < $this->prune_threshold_seconds){
                             $group_values[$group] = "$value $timestamp";
-                       }
-                   }
+						}
+					}
                 }
             }
         }
@@ -208,7 +208,7 @@ class Prometheus extends BaseDatastore
         $res = file_put_contents($target_file, $lines, LOCK_EX);
 
         if ($res === false){
-           die("Unable to write to $target_file " . implode(",",error_get_last()));
+			die("Unable to write to $target_file " . implode(",",error_get_last()));
         }
     }
 
